@@ -275,7 +275,6 @@ for f in range(image.nframes):
     target_shape = np.clip(np.ceil(np.array(conformed.shape[:3]) / 64).astype(int) * 64, 192, 320)
     conformed = conformed.reshape(target_shape)
 
-    print("Frame conformed")
     # normalize
     conformed -= conformed.min()
     conformed = (conformed / conformed.percentile(99)).clip(0, 1)
@@ -283,15 +282,10 @@ for f in range(image.nframes):
     # predict the sdt
     with torch.no_grad():
         input_tensor = torch.from_numpy(conformed.data[np.newaxis, np.newaxis]).to(device)
-        print("input tensor created")
-        onnx_program = torch.onnx.dynamo_export(model, input_tensor)
-        onnx_program.save("bet.onnx")
-        #sdt = model(input_tensor).cpu().numpy().squeeze()
-        print("Has sdt")
+        sdt = model(input_tensor).cpu().numpy().squeeze()
 
     # extend the sdt if needed, unconform
     sdt = extend_sdt(conformed.new(sdt), border=args.border)
-    print("Extend sdt")
     sdt = sdt.resample_like(image, fill=100)
     dist.append(sdt)
 
