@@ -155,10 +155,8 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
     dist = []
     mask = []
     for f in range(image.nframes):
-        print(f + 1, end=" ", flush=True)
+        # PREPROCESSING
         frame = image.new(image.framed_data[..., f])
-        print("Frame created")
-
         # conform, fit to shape with factors of 64
         conformed = frame.conform(
             voxsize=1.0, dtype="float32", method="nearest", orientation="LIA"
@@ -167,28 +165,26 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
             np.ceil(np.array(conformed.shape[:3]) / 64).astype(int) * 64, 192, 320
         )
         conformed = conformed.reshape(target_shape)
-
-        print("Frame conformed")
-        # normalize
         conformed -= conformed.min()
         conformed = (conformed / conformed.percentile(99)).clip(0, 1)
-        # predict the sdt
+        # END PREPROCESSING
+
+        # Input 
         input_tensor = torch.from_numpy(conformed.data[None, None])
-        print("input tensor created")
+        
         if saving:
+            np.save("./input_tensor.npy", input_tensor.numpy())
             onnx_program = torch.onnx.dynamo_export(model, input_tensor)
             onnx_program.save("bet.onnx")
-        sdt = model(input_tensor).cpu().numpy().squeeze()
-        print("Has sdt")
 
-        # extend the sdt if needed, unconform
-        print(type(conformed.new(sdt)))
+        sdt = model(input_tensor).cpu().numpy().squeeze()
+        if saving:
+            np.save("./out_tensor.npy", sdt)
+
+        # POST PROCESSING
         sdt = extend_sdt(conformed.new(sdt), border=args.border)
-        print("Extend sdt")
         sdt = sdt.resample_like(image, fill=100)
         dist.append(sdt)
-
-        # extract mask, find largest CC to be safe
         mask.append((sdt < args.border).connected_component_mask(k=1, fill=True))
 
     # combine frames and end line
@@ -237,6 +233,7 @@ if __name__ == "__main__":
         "--no-csf", action="store_true", help="exclude CSF from brain border"
     )
     p.add_argument("--model", metavar="FILE", help="alternative model weights")
+    p.add_argument("-s", "--saving", action="store_true", help="save the model to onnx format")
     if len(sys.argv) == 1 or "-h" in sys.argv or "--help" in sys.argv:
         p.print_help()
         exit(1)
@@ -245,4 +242,4 @@ if __name__ == "__main__":
         sf.system.fatal("Must provide at least one -o, -m, or -d output flag.")
     torch.set_grad_enabled(False)
 
-    run(args.image)
+    run(args.image, saving=args.saving)

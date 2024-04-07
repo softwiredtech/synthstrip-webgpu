@@ -11,3 +11,19 @@ This project is a port of the [SynthStrip](https://surfer.nmr.mgh.harvard.edu/do
 - The demo site doesn't have to do rendering, just NIfTI I/O
 
 NOTE: [surfa](https://github.com/freesurfer/surfa) might not work from `pip install`, for me it only worked through `git clone`, then pip install from the local repo
+
+## Usage
+
+Configure python environment
+
+```shell
+python -m venv venv
+source ./venv/bin/activate
+pip install -r ./requirements.txt
+```
+
+Run command
+
+```shell
+python ./synth_clean.py -i ./test_t1.nii -o ./out.nii -m ./mask.nii -d ./sdt.nii
+```
