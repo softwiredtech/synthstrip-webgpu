@@ -122,7 +122,7 @@ class StripModel(nn.Module):
         for conv in self.remaining:
             x = conv(x)
 
-        return x
+        return x.squeeze()
 
 
 class ConvBlock(nn.Module):
@@ -177,7 +177,7 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
             onnx_program = torch.onnx.dynamo_export(model, input_tensor)
             onnx_program.save("bet.onnx")
 
-        sdt = model(input_tensor).cpu().numpy().squeeze()
+        sdt = model(input_tensor).cpu().numpy()
         if saving:
             np.save("./out_tensor.npy", sdt)
 
