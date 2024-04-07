@@ -1,1 +1,5 @@
 venv/
+*.onnx
+*.npy
+*.nii
+!test_t1.nii
