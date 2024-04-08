@@ -201,22 +201,9 @@ def _rotation_matrix_to_orientation(matrix: np.array) -> str:
             orientation += 'S' if ax > 0 else 'I'
     return orientation
 
-def _check_orientation(orientation):
-    axes = ['LR', 'PA', 'IS']
-    rs = np.zeros(3, dtype='int')
-    for c in orientation.upper():
-        r = [c in axis for axis in axes]
-        if not any(r):
-            raise ValueError("bad orientation: unknown character '{c}'")
-        rs += r
-
-
 def _orientation_to_rotation_matrix(orientation):
-    orientation = orientation.upper()
-    _check_orientation(orientation)
-
     matrix = np.zeros((3, 3))
-    for i, c in enumerate(orientation):
+    for i, c in enumerate(orientation.upper()):
         matrix[:3, i] -= [c == x for x in 'LPI']
         matrix[:3, i] += [c == x for x in 'RAS']
     return matrix
