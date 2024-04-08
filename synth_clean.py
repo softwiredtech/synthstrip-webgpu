@@ -5,6 +5,7 @@ import torch.nn as nn
 import numpy as np
 import surfa as sf
 from typing import List
+from surfa.image.interp import interpolate
 
 def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
     if border < int(sdt.max()):
@@ -142,7 +143,7 @@ class ConvBlock(nn.Module):
         return out if self.activation is None else self.activation(out)
 
 
-def np_reshape(x: sf.image.Volume, shape: List[int]):
+def _reshape(x: sf.image.Volume, shape: List[int]):
     shape = shape[:x.basedim]
 
     if np.array_equal(x.baseshape, shape):
@@ -155,16 +156,23 @@ def np_reshape(x: sf.image.Volume, shape: List[int]):
     tc_low = tlow.clip(0)
     tc_high = thigh.clip(0)
     tpadding = ([z for y in zip(tc_low.tolist(), tc_high.tolist()) for z in y])
-    tc_data = torch.nn.functional.pad(torch.from_numpy(x.framed_data.T), tpadding, mode='constant')
+    tc_data = torch.nn.functional.pad(torch.from_numpy(_framed_data(x).T), tpadding, mode='constant')
     tc_data = tc_data.permute(*torch.arange(tc_data.ndim - 1, -1, -1))
 
     tcropping = tuple([slice(a, b) for a, b in zip((thigh.neg().clip(0)).int().tolist(), (torch.Tensor(list(tc_data.shape[:3])) - tlow.neg().clip(0)).int().tolist())])
     tc_data = tc_data[tcropping]
     return tc_data.squeeze()
 
+# Framed data is just the data with a last frame dimension
+# if data is shape (3, 3, 3) then framed data is shape (3, 3, 3, 1)
+def _framed_data(x: sf.image.Volume):
+    arr = x.data
+    for _ in range(x.basedim + 1 - x.data.ndim):
+        arr = np.expand_dims(arr, axis=-1)
+    return arr
 
 def _bbox(x: sf.image.Volume):
-    mask = x.max(frames=True).data > 0
+    mask = _framed_data(x).max(-1) > 0
     if not np.any(mask):
         return tuple([slice(0, s) for s in mask.shape])
     from scipy.ndimage import find_objects
@@ -177,7 +185,7 @@ def _orientation(x: sf.image.Volume, orientation: str):
     trg_orientation = orientation.upper()
     src_orientation = otn.rotation_matrix_to_orientation(x.geom.vox2world.matrix)
     if trg_orientation == src_orientation.upper():
-        return x.copy() if copy else x
+        return x
 
     # extract world axes
     get_world_axes = lambda aff: np.argmax(np.absolute(np.linalg.inv(aff)), axis=0)
@@ -216,8 +224,12 @@ def _orientation(x: sf.image.Volume, orientation: str):
         voxsize=voxsize)
     return x.new(data, target_geom)
 
-from surfa.image.interp import interpolate
-from surfa.core.array import pad_vector_length, check_array
+
+def pad_vector_length(arr, length, fill, copy=True):
+    arr = np.asarray(arr)
+    if len(arr) != length:
+        arr = np.concatenate([arr, np.repeat(fill, length - len(arr))])
+    return arr
 
 def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
     if np.isscalar(voxsize):
@@ -226,7 +238,6 @@ def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
     else:
         # pad to ensure array has length of 3
         voxsize = np.asarray(voxsize, dtype='float')
-        check_array(voxsize, ndim=1, shape=3, name='voxsize')
         voxsize = pad_vector_length(voxsize, 3, 1, copy=False)
 
     # check if anything needs to be done
@@ -262,15 +273,11 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
 
     # load input volume
     image: sf.image.Volume = sf.load_volume(in_image)
-    # print(f"Input image read from: {in_image}")
 
-    # loop over frames (try not to keep too much data in memory)
-    # print(f"Processing frame (of {image.nframes}):", end=" ", flush=True)
     dist = []
     mask = []
     for f in range(image.nframes):
-        # PREPROCESSING
-        frame = image.new(image.framed_data[..., f])
+        frame = image.new(_framed_data(image)[..., f])
         conformed = _conform(frame, voxsize=1.0, method="nearest", orientation="LIA")
         conformed = conformed[_bbox(conformed)]
         metadata = conformed.metadata
