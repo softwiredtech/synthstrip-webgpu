@@ -144,45 +144,40 @@ class ConvBlock(nn.Module):
 
 def np_reshape(x: sf.image.Volume, shape: List[int]):
     shape = shape[:x.basedim]
-    print(x.basedim, shape)
 
     if np.array_equal(x.baseshape, shape):
         return x
 
-    delta = (np.array(shape) - np.array(x.baseshape)) / 2
-    low = np.floor(delta).astype(int)
-    high = np.ceil(delta).astype(int)
+    tdelta = (torch.Tensor(shape) - torch.Tensor(x.baseshape)) / 2
+    tlow = tdelta.floor().int()
+    thigh = tdelta.ceil().int()
 
-    c_low = np.clip(low, 0, None)
-    c_high = np.clip(high, 0, None)
-    padding = list(zip(np.append(c_low, 0), np.append(c_high, 0)))
-    print(c_low, c_high, padding)
-    conformed_data = np.pad(x.framed_data, padding, mode='constant')
+    tc_low = tlow.clip(0)
+    tc_high = thigh.clip(0)
+    tpadding = ([z for y in zip(tc_low.tolist(), tc_high.tolist()) for z in y])
+    tc_data = torch.nn.functional.pad(torch.from_numpy(x.framed_data.T), tpadding, mode='constant')
+    tc_data = tc_data.permute(*torch.arange(tc_data.ndim - 1, -1, -1))
 
-    # low and high are intentionally swapped here
-    c_low = np.clip(-high, 0, None)
-    c_high = conformed_data.shape[:3] - np.clip(-low, 0, None)
-    cropping = tuple([slice(a, b) for a, b in zip(c_low, c_high)])
-    conformed_data = conformed_data[cropping]
+    tcropping = tuple([slice(a, b) for a, b in zip((thigh.neg().clip(0)).int().tolist(), (torch.Tensor(list(tc_data.shape[:3])) - tlow.neg().clip(0)).int().tolist())])
+    tc_data = tc_data[tcropping]
+        
+    tmatrix = torch.eye(4)
+    # TODO: Move geom stuff to torch
+    tmatrix[:3, :3] = torch.from_numpy(x.geom.vox2world.matrix[:3, :3])    
+    tp0crs = torch.clip(-thigh, 0) - tc_low
+    tp0 = torch.from_numpy(x.geom.vox2world(tp0crs.numpy()))
+    tmatrix[:3, 3] = tp0
 
-    # compute new affine if one exists
-    matrix = np.eye(4)
-    print(x.geom.vox2world)
-    matrix[:3, :3] = x.geom.vox2world.matrix[:3, :3]
-    p0crs = np.clip(-high, 0, None) - np.clip(low, 0, None)
-    p0 = x.geom.vox2world(p0crs)
-    matrix[:3, 3] = p0
-    pcrs = np.append(np.array(conformed_data.shape[:3]) / 2, 1)
-    cras = np.matmul(matrix, pcrs)[:3]
-    matrix[:3, 3] = 0
-    matrix[:3, 3] = cras - np.matmul(matrix, pcrs)[:3]
-
+    tpcrs = torch.Tensor([x / 2 for x in tc_data.shape[:3]] + [1])
+    tcras = torch.matmul(tmatrix, tpcrs)[:3]
+    tmatrix[:3, 3] = 0
+    tmatrix[:3, 3] = tcras - torch.matmul(tmatrix, tpcrs)[:3]
     # update geometry
     target_geom = sf.transform.ImageGeometry(
-        shape=conformed_data.shape[:3],
-        vox2world=matrix,
+        shape=tc_data.shape[:3],
+        vox2world=tmatrix.numpy(),
         voxsize=x.geom.voxsize)
-    return x.new(conformed_data, target_geom)
+    return x.new(tc_data.numpy(), target_geom)
 
 @torch.no_grad()
 def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = False):
