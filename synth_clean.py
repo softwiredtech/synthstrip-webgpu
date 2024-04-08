@@ -297,11 +297,9 @@ def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
                             method=method, affine=affine.matrix)
     return x.new(interped, target_geom)
 
-def _conform(x: sf.image.Volume, orientation: str = None, voxsize: float = None, method = "nearest"):
-    if orientation is not None:
-        x = _orientation(x, orientation)
-    if voxsize is not None:
-        x = _resize(x, voxsize, method)
+def _conform(x: sf.image.Volume):
+    x = _orientation(x, "LIA")
+    x = _resize(x, 1.0, "nearest")
     return x.astype(np.float32)
 
 
