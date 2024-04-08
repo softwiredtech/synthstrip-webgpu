@@ -8,6 +8,11 @@ from typing import List
 from surfa.image.interp import interpolate
 import scipy
 
+def _distance(x: sf.image.Volume):
+    sampling = x.geom.voxsize[:x.basedim]
+    dt = lambda z: scipy.ndimage.distance_transform_edt(1 - z, sampling=sampling)
+    return _stack([x.new(dt(_framed_data(x)[..., i])) for i in range(x.nframes)])
+
 def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
     if border < int(sdt.max()):
         return sdt
@@ -26,7 +31,7 @@ def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
     # Compute EDT within bounding box. Keep interior values.
     ind = tuple(slice(a, b + 1) for a, b in zip(low, upp))
     out = np.full_like(sdt, fill_value=100)
-    out[ind] = sf.Volume(mask[ind]).distance()
+    out[ind] = _distance(sf.Volume(mask[ind]))
     out[keep] = sdt[keep]
 
     return sdt.new(out)
@@ -410,7 +415,9 @@ if __name__ == "__main__":
         exit(1)
     args = p.parse_args()
     if not args.out and not args.mask and not args.sdt:
-        sf.system.fatal("Must provide at least one -o, -m, or -d output flag.")
+        print("Must provide at least one -o, -m, or -d output flag.")
+        exit(1)
+
     torch.set_grad_enabled(False)
 
     run(args.image, saving=args.saving)
