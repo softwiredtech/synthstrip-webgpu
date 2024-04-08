@@ -162,6 +162,99 @@ def np_reshape(x: sf.image.Volume, shape: List[int]):
     tc_data = tc_data[tcropping]
     return tc_data.squeeze()
 
+
+def _bbox(x: sf.image.Volume):
+    mask = x.max(frames=True).data > 0
+    if not np.any(mask):
+        return tuple([slice(0, s) for s in mask.shape])
+    from scipy.ndimage import find_objects
+    return find_objects(mask)[0]
+
+from surfa.transform import orientation as otn
+from surfa.transform.geometry import ImageGeometry
+
+def _orientation(x: sf.image.Volume, orientation: str):
+    trg_orientation = orientation.upper()
+    src_orientation = otn.rotation_matrix_to_orientation(x.geom.vox2world.matrix)
+    if trg_orientation == src_orientation.upper():
+        return x.copy() if copy else x
+
+    # extract world axes
+    get_world_axes = lambda aff: np.argmax(np.absolute(np.linalg.inv(aff)), axis=0)
+    trg_matrix = otn.orientation_to_rotation_matrix(trg_orientation)
+    src_matrix = otn.orientation_to_rotation_matrix(src_orientation)
+    world_axes_trg = get_world_axes(trg_matrix[:x.basedim, :x.basedim])
+    world_axes_src = get_world_axes(src_matrix[:x.basedim, :x.basedim])
+
+    voxsize = np.asarray(x.geom.voxsize)
+    voxsize = voxsize[world_axes_src][world_axes_trg]
+
+    # initialize new
+    data = x.data.copy()
+    affine = x.geom.vox2world.matrix.copy()
+
+    # align axes
+    affine[:, world_axes_trg] = affine[:, world_axes_src]
+    for i in range(x.basedim):
+        if world_axes_src[i] != world_axes_trg[i]:
+            data = np.swapaxes(data, world_axes_src[i], world_axes_trg[i])
+            swapped_axis_idx = np.where(world_axes_src == world_axes_trg[i])
+            world_axes_src[swapped_axis_idx], world_axes_src[i] = world_axes_src[i], world_axes_src[swapped_axis_idx]
+
+    # align directions
+    dot_products = np.sum(affine[:3, :3] * trg_matrix[:3, :3], axis=0)
+    for i in range(x.basedim):
+        if dot_products[i] < 0:
+            data = np.flip(data, axis=i)
+            affine[:, i] = - affine[:, i]
+            affine[:3, 3] = affine[:3, 3] - affine[:3, i] * (data.shape[i] - 1)
+
+    # update geometry
+    target_geom = ImageGeometry(
+        shape=data.shape[:3],
+        vox2world=affine,
+        voxsize=voxsize)
+    return x.new(data, target_geom)
+
+from surfa.image.interp import interpolate
+from surfa.core.array import pad_vector_length, check_array
+
+def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
+    if np.isscalar(voxsize):
+        # deal with a scalar voxel size input
+        voxsize = np.repeat(voxsize, 3).astype('float')
+    else:
+        # pad to ensure array has length of 3
+        voxsize = np.asarray(voxsize, dtype='float')
+        check_array(voxsize, ndim=1, shape=3, name='voxsize')
+        voxsize = pad_vector_length(voxsize, 3, 1, copy=False)
+
+    # check if anything needs to be done
+    if np.allclose(x.geom.voxsize, voxsize, atol=1e-5, rtol=0):
+        return x
+
+    baseshape3D = pad_vector_length(x.baseshape, 3, 1, copy=False)
+    target_shape = np.asarray(x.geom.voxsize, dtype='float') * baseshape3D / voxsize
+    target_shape = tuple(np.ceil(target_shape).astype(int))
+
+    target_geom = ImageGeometry(
+        shape=target_shape,
+        voxsize=voxsize,
+        rotation=x.geom.rotation,
+        center=x.geom.center)
+    affine = x.geom.world2vox @ target_geom.vox2world
+    interped = interpolate(source=x.framed_data, target_shape=target_shape,
+                            method=method, affine=affine.matrix)
+    return x.new(interped, target_geom)
+
+def _conform(x: sf.image.Volume, orientation: str = None, voxsize: float = None, method = "nearest"):
+    if orientation is not None:
+        x = _orientation(x, orientation)
+    if voxsize is not None:
+        x = _resize(x, voxsize, method)
+    return x.astype(np.float32)
+
+
 @torch.no_grad()
 def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = False):
     model = StripModel()
@@ -178,14 +271,12 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
     for f in range(image.nframes):
         # PREPROCESSING
         frame = image.new(image.framed_data[..., f])
-        # conform, fit to shape with factors of 64
-        conformed = frame.conform(
-            voxsize=1.0, dtype="float32", method="nearest", orientation="LIA"
-        ).crop_to_bbox()
+        conformed = _conform(frame, voxsize=1.0, method="nearest", orientation="LIA")
+        conformed = conformed[_bbox(conformed)]
         metadata = conformed.metadata
 
         target_shape = ((torch.Tensor(conformed.shape[:3]) / 64).ceil().type(torch.int32) * 64).clip(192, 320)
-        conformed = np_reshape(conformed, target_shape.tolist())
+        conformed = _reshape(conformed, target_shape.tolist())
         x = conformed.data[None, None]
         x -= x.min()
         x = (x / x.quantile(.99)).clip(0, 1)
