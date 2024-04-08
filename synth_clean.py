@@ -6,6 +6,7 @@ import numpy as np
 import surfa as sf
 from typing import List
 from surfa.image.interp import interpolate
+import scipy
 
 def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
     if border < int(sdt.max()):
@@ -155,6 +156,7 @@ def _reshape(x: sf.image.Volume, shape: List[int]):
 
     tc_low = tlow.clip(0)
     tc_high = thigh.clip(0)
+    # TODO: Clean this up
     tpadding = ([z for y in zip(tc_low.tolist(), tc_high.tolist()) for z in y])
     tc_data = torch.nn.functional.pad(torch.from_numpy(_framed_data(x).T), tpadding, mode='constant')
     tc_data = tc_data.permute(*torch.arange(tc_data.ndim - 1, -1, -1))
@@ -178,19 +180,51 @@ def _bbox(x: sf.image.Volume):
     from scipy.ndimage import find_objects
     return find_objects(mask)[0]
 
-from surfa.transform import orientation as otn
 from surfa.transform.geometry import ImageGeometry
+
+def _rotation_matrix_to_orientation(matrix: np.array) -> str:
+    matrix = matrix[:3, :3]
+    orientation = ''
+    for i in range(3):
+        sag, cor, ax = matrix[:, i]
+        if np.abs(sag) > np.abs(cor) and np.abs(sag) > np.abs(ax):
+            orientation += 'R' if sag > 0 else 'L'
+        elif np.abs(cor) > np.abs(ax):
+            orientation += 'A' if cor > 0 else 'P'
+        else:
+            orientation += 'S' if ax > 0 else 'I'
+    return orientation
+
+def _check_orientation(orientation):
+    axes = ['LR', 'PA', 'IS']
+    rs = np.zeros(3, dtype='int')
+    for c in orientation.upper():
+        r = [c in axis for axis in axes]
+        if not any(r):
+            raise ValueError("bad orientation: unknown character '{c}'")
+        rs += r
+
+
+def _orientation_to_rotation_matrix(orientation):
+    orientation = orientation.upper()
+    _check_orientation(orientation)
+
+    matrix = np.zeros((3, 3))
+    for i, c in enumerate(orientation):
+        matrix[:3, i] -= [c == x for x in 'LPI']
+        matrix[:3, i] += [c == x for x in 'RAS']
+    return matrix
 
 def _orientation(x: sf.image.Volume, orientation: str):
     trg_orientation = orientation.upper()
-    src_orientation = otn.rotation_matrix_to_orientation(x.geom.vox2world.matrix)
-    if trg_orientation == src_orientation.upper():
+    src_orientation = _rotation_matrix_to_orientation(x.geom.vox2world.matrix).upper()
+    if trg_orientation == src_orientation:
         return x
-
+    
     # extract world axes
     get_world_axes = lambda aff: np.argmax(np.absolute(np.linalg.inv(aff)), axis=0)
-    trg_matrix = otn.orientation_to_rotation_matrix(trg_orientation)
-    src_matrix = otn.orientation_to_rotation_matrix(src_orientation)
+    trg_matrix = _orientation_to_rotation_matrix(trg_orientation)
+    src_matrix = _orientation_to_rotation_matrix(src_orientation)
     world_axes_trg = get_world_axes(trg_matrix[:x.basedim, :x.basedim])
     world_axes_src = get_world_axes(src_matrix[:x.basedim, :x.basedim])
 
@@ -266,6 +300,28 @@ def _conform(x: sf.image.Volume, orientation: str = None, voxsize: float = None,
     return x.astype(np.float32)
 
 
+def _resample_like(x: sf.image.Volume, target: sf.image.Volume, fill = 0):
+    affine = x.geom.world2vox @ target.geom.vox2world
+    interped = interpolate(source=x.framed_data, target_shape=target.geom.shape,
+                               method='linear', affine=affine.matrix, fill=fill)
+    return x.new(interped, target.geom)
+
+def _connected_components(x: sf.image.Volume):
+        cc = [x.new(scipy.ndimage.label(_framed_data(x)[..., i])[0]) for i in range(x.nframes)]
+        return _stack(cc)
+
+def _connected_component_mask(x: sf.image.Volume, k=1, fill=False):
+    cc = _connected_components(x)
+    bincounts = [np.bincount(_framed_data(cc)[..., i].flat)[1:] for i in range(cc.nframes)]
+    topk = [(-bc).argsort()[:k] + 1 for bc in bincounts]
+    mask = [np.isin(_framed_data(cc)[..., i], topk[i]) for i in range(x.nframes)]
+    if fill:
+        mask = [scipy.ndimage.binary_fill_holes(m) for m in mask]
+    return _stack([x.new(m) for m in mask])
+
+def _stack(arrays: List[sf.image.Volume]):
+    return arrays[0].new(np.concatenate([_framed_data(arr) for arr in arrays], axis=-1))
+
 @torch.no_grad()
 def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = False):
     model = StripModel()
@@ -301,8 +357,7 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
         sdt = extend_sdt(sf.image.framed.Volume(sdt, metadata=metadata), border=args.border)
         sdt = sdt.resample_like(image, fill=100)
         dist.append(sdt)
-        mask.append((sdt < args.border).connected_component_mask(k=1, fill=True))
-
+        mask.append(_connected_component_mask((sdt < args.border), k=1, fill=True))
     # combine frames and end line
     dist = sf.stack(dist)
     mask = sf.stack(mask)
