@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 import surfa as sf
+from typing import List
 
-
-def extend_sdt(sdt: sf.image.framed.Volume, border=1):
+def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
     if border < int(sdt.max()):
         return sdt
 
@@ -141,17 +141,60 @@ class ConvBlock(nn.Module):
         out = self.conv(x)
         return out if self.activation is None else self.activation(out)
 
+
+def np_reshape(x: sf.image.Volume, shape: List[int]):
+    shape = shape[:x.basedim]
+    print(x.basedim, shape)
+
+    if np.array_equal(x.baseshape, shape):
+        return x
+
+    delta = (np.array(shape) - np.array(x.baseshape)) / 2
+    low = np.floor(delta).astype(int)
+    high = np.ceil(delta).astype(int)
+
+    c_low = np.clip(low, 0, None)
+    c_high = np.clip(high, 0, None)
+    padding = list(zip(np.append(c_low, 0), np.append(c_high, 0)))
+    print(c_low, c_high, padding)
+    conformed_data = np.pad(x.framed_data, padding, mode='constant')
+
+    # low and high are intentionally swapped here
+    c_low = np.clip(-high, 0, None)
+    c_high = conformed_data.shape[:3] - np.clip(-low, 0, None)
+    cropping = tuple([slice(a, b) for a, b in zip(c_low, c_high)])
+    conformed_data = conformed_data[cropping]
+
+    # compute new affine if one exists
+    matrix = np.eye(4)
+    print(x.geom.vox2world)
+    matrix[:3, :3] = x.geom.vox2world.matrix[:3, :3]
+    p0crs = np.clip(-high, 0, None) - np.clip(low, 0, None)
+    p0 = x.geom.vox2world(p0crs)
+    matrix[:3, 3] = p0
+    pcrs = np.append(np.array(conformed_data.shape[:3]) / 2, 1)
+    cras = np.matmul(matrix, pcrs)[:3]
+    matrix[:3, 3] = 0
+    matrix[:3, 3] = cras - np.matmul(matrix, pcrs)[:3]
+
+    # update geometry
+    target_geom = sf.transform.ImageGeometry(
+        shape=conformed_data.shape[:3],
+        vox2world=matrix,
+        voxsize=x.geom.voxsize)
+    return x.new(conformed_data, target_geom)
+
 @torch.no_grad()
 def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = False):
     model = StripModel()
     model.load_state_dict(torch.load(modelfile, map_location="cpu")["model_state_dict"])
 
     # load input volume
-    image = sf.load_volume(in_image)
-    print(f"Input image read from: {in_image}")
+    image: sf.image.Volume = sf.load_volume(in_image)
+    # print(f"Input image read from: {in_image}")
 
     # loop over frames (try not to keep too much data in memory)
-    print(f"Processing frame (of {image.nframes}):", end=" ", flush=True)
+    # print(f"Processing frame (of {image.nframes}):", end=" ", flush=True)
     dist = []
     mask = []
     for f in range(image.nframes):
@@ -161,23 +204,19 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
         conformed = frame.conform(
             voxsize=1.0, dtype="float32", method="nearest", orientation="LIA"
         ).crop_to_bbox()
-        target_shape = np.clip(
-            np.ceil(np.array(conformed.shape[:3]) / 64).astype(int) * 64, 192, 320
-        )
-        conformed = conformed.reshape(target_shape)
-        conformed -= conformed.min()
-        conformed = (conformed / conformed.percentile(99)).clip(0, 1)
-        # END PREPROCESSING
-
-        # Input 
-        input_tensor = torch.from_numpy(conformed.data[None, None])
-        
+        target_shape = ((torch.Tensor(conformed.shape[:3]) / 64).ceil().type(torch.int32) * 64).clip(192, 320)
+        conformed = np_reshape(conformed, target_shape.tolist())
+        # conformed = conformed.reshape(target_shape)
+        x = torch.from_numpy(conformed.data[None, None])
+        x -= x.min()
+        x = (x / x.quantile(.99)).clip(0, 1)
         if saving:
-            np.save("./input_tensor.npy", input_tensor.numpy())
-            onnx_program = torch.onnx.dynamo_export(model, input_tensor)
+            np.save("./input_tensor.npy", x.numpy())
+            onnx_program = torch.onnx.dynamo_export(model, x)
             onnx_program.save("bet.onnx")
 
-        sdt = model(input_tensor).cpu().numpy()
+        sdt = model(x).cpu().numpy()
+
         if saving:
             np.save("./out_tensor.npy", sdt)
 
