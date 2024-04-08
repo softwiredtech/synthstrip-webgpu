@@ -7,6 +7,7 @@ import surfa as sf
 from typing import List
 from surfa.image.interp import interpolate
 import scipy
+import math
 
 def _distance(x: sf.image.Volume):
     sampling = x.geom.voxsize[:x.basedim]
@@ -264,28 +265,14 @@ def _orientation(x: sf.image.Volume, orientation: str):
     return x.new(data, target_geom)
 
 
-def pad_vector_length(arr, length, fill, copy=True):
-    arr = np.asarray(arr)
-    if len(arr) != length:
-        arr = np.concatenate([arr, np.repeat(fill, length - len(arr))])
-    return arr
 
 def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
-    if np.isscalar(voxsize):
-        # deal with a scalar voxel size input
-        voxsize = np.repeat(voxsize, 3).astype('float')
-    else:
-        # pad to ensure array has length of 3
-        voxsize = np.asarray(voxsize, dtype='float')
-        voxsize = pad_vector_length(voxsize, 3, 1, copy=False)
-
     # check if anything needs to be done
     if np.allclose(x.geom.voxsize, voxsize, atol=1e-5, rtol=0):
         return x
-
-    baseshape3D = pad_vector_length(x.baseshape, 3, 1, copy=False)
-    target_shape = np.asarray(x.geom.voxsize, dtype='float') * baseshape3D / voxsize
-    target_shape = tuple(np.ceil(target_shape).astype(int))
+        
+    _shape = x.baseshape if len(x.baseshape) >= 3 else x.baseshape + [1] * (3 - len(x.baseshape)) 
+    target_shape = tuple([math.ceil((gv * bs) / voxsize) for gv, bs in zip(x.geom.voxsize, _shape)])
 
     target_geom = ImageGeometry(
         shape=target_shape,
