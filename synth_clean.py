@@ -317,11 +317,11 @@ def _connected_components(x: sf.image.Volume):
 
 def _connected_component_mask(x: sf.image.Volume, k=1, fill=False):
     cc = _connected_components(x)
-    bincounts = [np.bincount(_framed_data(cc)[..., i].flat)[1:] for i in range(cc.nframes)]
+    bincounts = [torch.bincount(torch.from_numpy(_framed_data(cc))[..., i].flatten())[1:] for i in range(cc.nframes)]
     topk = [(-bc).argsort()[:k] + 1 for bc in bincounts]
-    mask = [np.isin(_framed_data(cc)[..., i], topk[i]) for i in range(x.nframes)]
+    mask = [torch.isin(torch.from_numpy(_framed_data(cc))[..., i], topk[i]) for i in range(x.nframes)]
     if fill:
-        mask = [scipy.ndimage.binary_fill_holes(m) for m in mask]
+        mask = [scipy.ndimage.binary_fill_holes(m.numpy()) for m in mask]
     return _stack([x.new(m) for m in mask])
 
 def _stack(arrays: List[sf.image.Volume]):
