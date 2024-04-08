@@ -160,24 +160,7 @@ def np_reshape(x: sf.image.Volume, shape: List[int]):
 
     tcropping = tuple([slice(a, b) for a, b in zip((thigh.neg().clip(0)).int().tolist(), (torch.Tensor(list(tc_data.shape[:3])) - tlow.neg().clip(0)).int().tolist())])
     tc_data = tc_data[tcropping]
-        
-    tmatrix = torch.eye(4)
-    # TODO: Move geom stuff to torch
-    tmatrix[:3, :3] = torch.from_numpy(x.geom.vox2world.matrix[:3, :3])    
-    tp0crs = torch.clip(-thigh, 0) - tc_low
-    tp0 = torch.from_numpy(x.geom.vox2world(tp0crs.numpy()))
-    tmatrix[:3, 3] = tp0
-
-    tpcrs = torch.Tensor([x / 2 for x in tc_data.shape[:3]] + [1])
-    tcras = torch.matmul(tmatrix, tpcrs)[:3]
-    tmatrix[:3, 3] = 0
-    tmatrix[:3, 3] = tcras - torch.matmul(tmatrix, tpcrs)[:3]
-    # update geometry
-    target_geom = sf.transform.ImageGeometry(
-        shape=tc_data.shape[:3],
-        vox2world=tmatrix.numpy(),
-        voxsize=x.geom.voxsize)
-    return x.new(tc_data.numpy(), target_geom)
+    return tc_data.squeeze()
 
 @torch.no_grad()
 def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = False):
@@ -199,10 +182,11 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
         conformed = frame.conform(
             voxsize=1.0, dtype="float32", method="nearest", orientation="LIA"
         ).crop_to_bbox()
+        metadata = conformed.metadata
+
         target_shape = ((torch.Tensor(conformed.shape[:3]) / 64).ceil().type(torch.int32) * 64).clip(192, 320)
         conformed = np_reshape(conformed, target_shape.tolist())
-        # conformed = conformed.reshape(target_shape)
-        x = torch.from_numpy(conformed.data[None, None])
+        x = conformed.data[None, None]
         x -= x.min()
         x = (x / x.quantile(.99)).clip(0, 1)
         if saving:
@@ -216,7 +200,7 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
             np.save("./out_tensor.npy", sdt)
 
         # POST PROCESSING
-        sdt = extend_sdt(conformed.new(sdt), border=args.border)
+        sdt = extend_sdt(sf.image.framed.Volume(sdt, metadata=metadata), border=args.border)
         sdt = sdt.resample_like(image, fill=100)
         dist.append(sdt)
         mask.append((sdt < args.border).connected_component_mask(k=1, fill=True))
