@@ -266,33 +266,29 @@ def _orientation(x: sf.image.Volume, orientation: str):
 
 
 
-def _resize(x: sf.image.Volume, voxsize: float, method: str = "nearest"):
-    # check if anything needs to be done
-    if np.allclose(x.geom.voxsize, voxsize, atol=1e-5, rtol=0):
-        return x
-        
+def _resize(x: sf.image.Volume):
     _shape = x.baseshape if len(x.baseshape) >= 3 else x.baseshape + [1] * (3 - len(x.baseshape)) 
-    target_shape = tuple([math.ceil((gv * bs) / voxsize) for gv, bs in zip(x.geom.voxsize, _shape)])
+    target_shape = tuple([math.ceil((gv * bs) / 1.) for gv, bs in zip(x.geom.voxsize, _shape)])
 
     target_geom = ImageGeometry(
         shape=target_shape,
-        voxsize=voxsize,
+        voxsize=1.,
         rotation=x.geom.rotation,
         center=x.geom.center)
     affine = x.geom.world2vox @ target_geom.vox2world
-    interped = interpolate(source=x.framed_data, target_shape=target_shape,
-                            method=method, affine=affine.matrix)
+    interped = interpolate(source=_framed_data(x), target_shape=target_shape,
+                            method="nearest", affine=affine.matrix)
     return x.new(interped, target_geom)
 
 def _conform(x: sf.image.Volume):
     x = _orientation(x, "LIA")
-    x = _resize(x, 1.0, "nearest")
+    x = _resize(x)
     return x.astype(np.float32)
 
 
 def _resample_like(x: sf.image.Volume, target: sf.image.Volume, fill = 0):
     affine = x.geom.world2vox @ target.geom.vox2world
-    interped = interpolate(source=x.framed_data, target_shape=target.geom.shape,
+    interped = interpolate(source=_framed_data(x), target_shape=target.geom.shape,
                                method='linear', affine=affine.matrix, fill=fill)
     return x.new(interped, target.geom)
 
