@@ -489,19 +489,18 @@ def _resample_like(x: torch.Tensor, target: sf.image.Volume, fill = 0):
     # np.testing.assert_allclose(interped, cinterped, atol=1e-4, rtol=1e-5)
     return interped
 
-def _connected_components(x: sf.image.Volume):
+def _connected_components(x: torch.Tensor):
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.label.html
-        cc = [x.new(scipy.ndimage.label(_framed_data(x)[..., i])[0]) for i in range(x.nframes)]
-        return _stack(cc)
+        return torch.stack([torch.from_numpy(scipy.ndimage.label(_framed_data(x)[..., i])[0]) for i in range(x.shape[-1])], dim=-1)
 
-def _connected_component_mask(x: sf.image.Volume, k=1, fill=False):
+def _connected_component_mask(x: torch.Tensor, k=1, fill=False):
     cc = _connected_components(x)
-    bincounts = [torch.bincount(torch.from_numpy(_framed_data(cc))[..., i].flatten())[1:] for i in range(cc.nframes)]
+    bincounts = [torch.bincount(_framed_data(cc)[..., i].flatten())[1:] for i in range(cc.shape[-1])]
     topk = [(-bc).argsort()[:k] + 1 for bc in bincounts]
-    mask = [torch.isin(torch.from_numpy(_framed_data(cc))[..., i], topk[i]) for i in range(x.nframes)]
+    mask = [torch.isin(_framed_data(cc)[..., i], topk[i]) for i in range(x.shape[-1])]
     if fill:
-        mask = [scipy.ndimage.binary_fill_holes(m.numpy()) for m in mask]
-    return _stack([x.new(m) for m in mask])
+        mask = [torch.from_numpy(scipy.ndimage.binary_fill_holes(m.numpy())) for m in mask]
+    return torch.stack(mask)
 
 def _stack(arrays: List[sf.image.Volume]):
     return arrays[0].new(np.concatenate([_framed_data(arr) for arr in arrays], axis=-1))
@@ -542,12 +541,13 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
         sdt = extend_sdt(sdt, border=args.border)
 
         sdt = _resample_like(sdt, image, fill=100)
-        sdt = image.new(sdt, image.geom)
+        sdt = torch.from_numpy(sdt)
+
         dist.append(sdt)
         mask.append(_connected_component_mask((sdt < args.border), k=1, fill=True))
     # combine frames and end line
-    dist = sf.stack(dist)
-    mask = sf.stack(mask)
+    dist = sf.stack([sf.image.Volume(m.numpy()) for m in dist])
+    mask = sf.stack([sf.image.Volume(m.squeeze().numpy()) for m in mask])
     print("done")
 
     # write the masked output
