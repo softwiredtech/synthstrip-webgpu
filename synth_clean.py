@@ -9,6 +9,27 @@ from surfa.image.interp import interpolate
 import scipy
 import math
 
+# Initializers 
+def _world2vox(x: np.ndarray):
+    return np.linalg.inv(x)
+
+def _vox2world(shape: List[int], rotation = None, center = None):
+    # default voxel sizes
+    voxsize = np.ones(3)
+    shape = np.array(shape)
+    rotation = _orientation_to_rotation_matrix("LIA") if rotation is None else rotation
+    center = np.zeros(3) if center is None else center
+    shear = np.repeat(0.0, 3)
+    matshear = np.eye(3)
+    matshear[0, 1] = shear[0]
+    matshear[0, 2] = shear[1]
+    matshear[1, 2] = shear[2]
+    affine = np.eye(4)
+    affine[:3, :3] = rotation @ (np.diag(voxsize) @ matshear)
+    offset = affine @ np.append(shape / 2, 1)
+    affine[:3, 3] = center - offset[:3]
+    return affine
+
 def _distance(x: sf.image.Volume):
     sampling = x.geom.voxsize[:x.basedim]
     dt = lambda z: scipy.ndimage.distance_transform_edt(1 - z, sampling=sampling)
@@ -250,7 +271,6 @@ def _orientation(x: sf.image.Volume, orientation: str):
         vox2world=affine,
         voxsize=voxsize)
     return x.new(data, target_geom)
-import sys
 
 def interp(source: np.ndarray, method: str, target_shape: List[int], affine=None, fill = 0):
     if not source.flags.c_contiguous and not source.flags.f_contiguous:
@@ -288,23 +308,18 @@ def interp_3d_contiguous_linear(source: np.ndarray, target_shape: List[int], fil
     target = np.zeros([x_max, y_max, z_max, frames], dtype=np.float32, order='F')
     target_view = target
 
-    # extract affine matrix values
-    mat00, mat01, mat02, mat03 = 0.0, 0.0, 0.0, 0.0
-    mat10, mat11, mat12, mat13 = 0.0, 0.0, 0.0, 0.0
-    mat20, mat21, mat22, mat23 = 0.0, 0.0, 0.0, 0.0
-    if affine is not None:
-        mat00 = affine[0, 0]
-        mat01 = affine[0, 1]
-        mat02 = affine[0, 2]
-        mat03 = affine[0, 3]
-        mat10 = affine[1, 0]
-        mat11 = affine[1, 1]
-        mat12 = affine[1, 2]
-        mat13 = affine[1, 3]
-        mat20 = affine[2, 0]
-        mat21 = affine[2, 1]
-        mat22 = affine[2, 2]
-        mat23 = affine[2, 3]
+    mat00 = affine[0, 0]
+    mat01 = affine[0, 1]
+    mat02 = affine[0, 2]
+    mat03 = affine[0, 3]
+    mat10 = affine[1, 0]
+    mat11 = affine[1, 1]
+    mat12 = affine[1, 2]
+    mat13 = affine[1, 3]
+    mat20 = affine[2, 0]
+    mat21 = affine[2, 1]
+    mat22 = affine[2, 2]
+    mat23 = affine[2, 3]
 
     # loop over each voxel in the target image
     for x in range(x_max):
@@ -314,15 +329,10 @@ def interp_3d_contiguous_linear(source: np.ndarray, target_shape: List[int], fil
                 iy = y
                 iz = z
 
-                if affine is not None:
-                    sx = (mat00 * ix) + (mat01 * iy) + (mat02 * iz) + mat03
-                    sy = (mat10 * ix) + (mat11 * iy) + (mat12 * iz) + mat13
-                    sz = (mat20 * ix) + (mat21 * iy) + (mat22 * iz) + mat23
-                else:
-                    sx = ix
-                    sy = iy
-                    sz = iz
-
+                sx = (mat00 * ix) + (mat01 * iy) + (mat02 * iz) + mat03
+                sy = (mat10 * ix) + (mat11 * iy) + (mat12 * iz) + mat13
+                sz = (mat20 * ix) + (mat21 * iy) + (mat22 * iz) + mat23
+                
                 # get low and high coords
                 sx_low = int(math.floor(sx))
                 sy_low = int(math.floor(sy))
@@ -399,37 +409,27 @@ def _interpolate_nearest(source: np.array, target_shape: List[int], fill_value, 
     target = np.zeros([x_max, y_max, z_max, frames], dtype=np.float32, order='F')
     target_view = target
     # extract affine matrix values
-    mat00, mat01, mat02, mat03 = 0.0, 0.0, 0.0, 0.0
-    mat10, mat11, mat12, mat13 = 0.0, 0.0, 0.0, 0.0
-    mat20, mat21, mat22, mat23 = 0.0, 0.0, 0.0, 0.0
-    if affine is not None:
-        mat00 = affine[0, 0]
-        mat01 = affine[0, 1]
-        mat02 = affine[0, 2]
-        mat03 = affine[0, 3]
-        mat10 = affine[1, 0]
-        mat11 = affine[1, 1]
-        mat12 = affine[1, 2]
-        mat13 = affine[1, 3]
-        mat20 = affine[2, 0]
-        mat21 = affine[2, 1]
-        mat22 = affine[2, 2]
-        mat23 = affine[2, 3]
+    mat00 = affine[0, 0]
+    mat01 = affine[0, 1]
+    mat02 = affine[0, 2]
+    mat03 = affine[0, 3]
+    mat10 = affine[1, 0]
+    mat11 = affine[1, 1]
+    mat12 = affine[1, 2]
+    mat13 = affine[1, 3]
+    mat20 = affine[2, 0]
+    mat21 = affine[2, 1]
+    mat22 = affine[2, 2]
+    mat23 = affine[2, 3]
 
     # loop over each voxel in the target image
     for z in range(z_max):
         for y in range(y_max):
             for x in range(x_max):
-
-                if affine is not None:
-                    sx = (mat00 * x) + (mat01 * y) + (mat02 * z) + mat03
-                    sy = (mat10 * x) + (mat11 * y) + (mat12 * z) + mat13
-                    sz = (mat20 * x) + (mat21 * y) + (mat22 * z) + mat23
-                else:
-                    sx = x
-                    sy = y
-                    sz = z
-
+                sx = (mat00 * x) + (mat01 * y) + (mat02 * z) + mat03
+                sy = (mat10 * x) + (mat11 * y) + (mat12 * z) + mat13
+                sz = (mat20 * x) + (mat21 * y) + (mat22 * z) + mat23
+             
                 # check coordinate limits
                 if sx < 0 or sx >= sx_max or \
                    sy < 0 or sy >= sy_max or \
@@ -457,12 +457,14 @@ def _resize(x: sf.image.Volume):
     _shape = x.baseshape if len(x.baseshape) >= 3 else x.baseshape + [1] * (3 - len(x.baseshape)) 
     target_shape = tuple([math.ceil((gv * bs) / 1.) for gv, bs in zip(x.geom.voxsize, _shape)])
 
+    # Only kept because of the Volume constructor, not using for compute anymore
     target_geom = ImageGeometry(
         shape=target_shape,
         voxsize=1.,
         rotation=x.geom.rotation,
         center=x.geom.center)
-    affine = x.geom.world2vox @ target_geom.vox2world
+    
+    affine = x.geom.world2vox @ _vox2world(target_shape, rotation=x.geom.rotation, center=x.geom.center)
     # surfa/image/interp.pyx
     interped = interpolate(source=_framed_data(x), target_shape=target_shape, method="nearest", affine=affine.matrix)
     # interped = interp(_framed_data(x), "nearest", target_shape, affine=affine.matrix)
@@ -477,7 +479,7 @@ def _conform(x: sf.image.Volume):
 
 
 def _resample_like(x: sf.image.Volume, target: sf.image.Volume, fill = 0):
-    affine = x.geom.world2vox @ target.geom.vox2world
+    affine = _world2vox(_vox2world(x.shape)) @ target.geom.vox2world
     interped = interpolate(source=_framed_data(x), target_shape=target.geom.shape, method='linear', affine=affine.matrix, fill=fill)
     # interped = interp(_framed_data(x), "linear", target.geom.shape, affine=affine.matrix, fill=fill)
     # np.testing.assert_allclose(interped, cinterped, atol=1e-4, rtol=1e-5)
