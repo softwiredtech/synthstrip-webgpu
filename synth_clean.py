@@ -5,7 +5,6 @@ import torch.nn as nn
 import numpy as np
 import surfa as sf
 from typing import List
-from surfa.image.interp import interpolate
 import scipy
 import math
 
@@ -205,7 +204,7 @@ def _reshape(x: torch.Tensor, shape: List[int]):
 
 # Framed data is just the data with a last frame dimension
 # if data is shape (3, 3, 3) then framed data is shape (3, 3, 3, 1)
-def _framed_data(x: sf.image.Volume):
+def _framed_data(x: sf.image.Volume) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         if x.shape[-1] == 1:
             return x
@@ -242,7 +241,7 @@ def _orientation_to_rotation_matrix(orientation):
         matrix[:3, i] += torch.Tensor([c == x for x in 'RAS'])
     return matrix
 
-def _orientation(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor, orientation: str):
+def _orientation(x: torch.Tensor, matrix: torch.Tensor, orientation: str):
     src_orientation = _rotation_matrix_to_orientation(matrix).upper()
     if orientation.upper() == src_orientation:
         return x
@@ -254,7 +253,7 @@ def _orientation(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor
     world_axes_src = torch.argmax(torch.linalg.inv(src_matrix[:3, :3]).abs(), dim=0).numpy()
 
     # initialize new
-    data = x.data.copy()
+    data = x.numpy()
     affine = matrix.clone()
 
     # align axes
@@ -460,14 +459,11 @@ def _interpolate_nearest(source: np.array, target_shape: List[int], fill_value, 
 def _resize(x: sf.image.Volume, affine: torch.Tensor, voxsize: List[float], rotation: torch.Tensor, center: torch.Tensor):
     target_shape = tuple([math.ceil((gv * bs) / 1.) for gv, bs in zip(voxsize, x.shape)])   
     affine = _world2vox(affine) @ _vox2world(target_shape, rotation=rotation.numpy(), center=center.numpy())
-    interped = interpolate(source=_framed_data(x).numpy(), target_shape=target_shape, method="nearest", affine=affine)
-    # interped = interp(_framed_data(x), "nearest", target_shape, affine=affine.matrix)
-    # np.testing.assert_allclose(interped, cinterped, atol=1e-6, rtol=1e-6)
-    
+    interped = interp(_framed_data(x).numpy(), "nearest", target_shape, affine=affine)    
     return torch.from_numpy(interped)
 
 def _conform(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor):
-    x, affine = _orientation(x, matrix, voxsize, "LIA")
+    x, affine = _orientation(x, matrix, "LIA")
     center, rotation = _get_center_rotation(affine, voxsize, list(x.shape))
     x = _resize(x, affine, voxsize, rotation, center)
     return x.float()
@@ -507,8 +503,9 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
     voxsize = torch.Tensor(image.geom.voxsize.copy()).float()
     dist = []
     mask = []
-    for f in range(image.nframes):
-        frame = image.new(_framed_data(image)[..., f])
+    timage = torch.from_numpy(image.data)
+    for f in range(timage.shape[-1]):
+        frame = _framed_data(timage)[..., f]
         conformed = _conform(frame, imagematrix, voxsize).squeeze()
         conformed = conformed[_bbox(conformed)]
         metadata = conformed.metadata
