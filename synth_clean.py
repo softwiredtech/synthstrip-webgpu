@@ -30,15 +30,26 @@ def _vox2world(shape: List[int], rotation = None, center = None):
     affine[:3, 3] = center - offset[:3]
     return affine
 
+def _get_center_rotation(affine: torch.Tensor, voxsize: torch.Tensor, shape: List[int]):
+    center = (affine @ torch.Tensor([s / 2 for s in shape] +  [1]))[:3]
+    q, r = torch.linalg.qr(affine[:3, :3])
+    di = np.diag_indices(3)
+    voxsize = torch.abs(r[di])
+    p = torch.eye(3)
+    p[di] = r[di] / voxsize
+    rotation = q @ p
+    return center, rotation
+
 def _distance(x: sf.image.Volume):
     sampling = x.geom.voxsize[:x.basedim]
     dt = lambda z: scipy.ndimage.distance_transform_edt(1 - z, sampling=sampling)
     return _stack([x.new(dt(_framed_data(x)[..., i])) for i in range(x.nframes)])
 
-def extend_sdt(sdt: sf.image.framed.Volume, border=1) -> sf.image.framed.Volume:
+def extend_sdt(sdt: torch.Tensor, border=1) -> torch.Tensor:
     if border < int(sdt.max()):
         return sdt
 
+    # TODO: Need an example image that hits this to properly test.
     # Find bounding box.
     mask = sdt < 1
     keep = np.nonzero(mask)
@@ -171,13 +182,13 @@ class ConvBlock(nn.Module):
         return out if self.activation is None else self.activation(out)
 
 
-def _reshape(x: sf.image.Volume, shape: List[int]):
-    shape = shape[:x.basedim]
+def _reshape(x: torch.Tensor, shape: List[int]):
+    shape = shape[:3]
 
-    if np.array_equal(x.baseshape, shape):
+    if np.array_equal(x.shape, shape):
         return x
 
-    tdelta = (torch.Tensor(shape) - torch.Tensor(x.baseshape)) / 2
+    tdelta = (torch.Tensor(shape) - torch.Tensor(list(x.shape))) / 2
     tlow = tdelta.floor().int()
     thigh = tdelta.ceil().int()
 
@@ -185,7 +196,7 @@ def _reshape(x: sf.image.Volume, shape: List[int]):
     tc_high = thigh.clip(0)
     # TODO: Clean this up
     tpadding = ([z for y in zip(tc_low.tolist(), tc_high.tolist()) for z in y])
-    tc_data = torch.nn.functional.pad(torch.from_numpy(_framed_data(x).T), tpadding, mode='constant')
+    tc_data = torch.nn.functional.pad(_framed_data(x).T, tpadding, mode='constant')
     tc_data = tc_data.permute(*torch.arange(tc_data.ndim - 1, -1, -1))
 
     tcropping = tuple([slice(a, b) for a, b in zip((thigh.neg().clip(0)).int().tolist(), (torch.Tensor(list(tc_data.shape[:3])) - tlow.neg().clip(0)).int().tolist())])
@@ -204,14 +215,12 @@ def _framed_data(x: sf.image.Volume):
         arr = np.expand_dims(arr, axis=-1)
     return arr
 
-def _bbox(x: sf.image.Volume):
-    mask = _framed_data(x).max(-1) > 0
-    if not np.any(mask):
+def _bbox(x: torch.Tensor):
+    mask = _framed_data(x).max(-1)[0] != 0
+    if not torch.any(mask):
         return tuple([slice(0, s) for s in mask.shape])
     from scipy.ndimage import find_objects
-    return find_objects(mask)[0]
-
-from surfa.transform.geometry import ImageGeometry
+    return find_objects(mask.numpy())[0]
 
 def _rotation_matrix_to_orientation(matrix: np.array) -> str:
     matrix = matrix[:3, :3]
@@ -227,54 +236,45 @@ def _rotation_matrix_to_orientation(matrix: np.array) -> str:
     return orientation
 
 def _orientation_to_rotation_matrix(orientation):
-    matrix = np.zeros((3, 3))
+    matrix = torch.zeros((3, 3))
     for i, c in enumerate(orientation.upper()):
-        matrix[:3, i] -= [c == x for x in 'LPI']
-        matrix[:3, i] += [c == x for x in 'RAS']
+        matrix[:3, i] -= torch.Tensor([c == x for x in 'LPI'])
+        matrix[:3, i] += torch.Tensor([c == x for x in 'RAS'])
     return matrix
 
-def _orientation(x: sf.image.Volume, orientation: str):
-    trg_orientation = orientation.upper()
-    src_orientation = _rotation_matrix_to_orientation(x.geom.vox2world.matrix).upper()
-    if trg_orientation == src_orientation:
+def _orientation(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor, orientation: str):
+    src_orientation = _rotation_matrix_to_orientation(matrix).upper()
+    if orientation.upper() == src_orientation:
         return x
     
     # extract world axes
-    get_world_axes = lambda aff: np.argmax(np.absolute(np.linalg.inv(aff)), axis=0)
-    trg_matrix = _orientation_to_rotation_matrix(trg_orientation)
+    trg_matrix = _orientation_to_rotation_matrix(orientation)
     src_matrix = _orientation_to_rotation_matrix(src_orientation)
-    world_axes_trg = get_world_axes(trg_matrix[:x.basedim, :x.basedim])
-    world_axes_src = get_world_axes(src_matrix[:x.basedim, :x.basedim])
-
-    voxsize = np.asarray(x.geom.voxsize)
-    voxsize = voxsize[world_axes_src][world_axes_trg]
+    world_axes_trg = torch.argmax(torch.linalg.inv(trg_matrix[:3, :3]).abs(), dim=0).numpy()
+    world_axes_src = torch.argmax(torch.linalg.inv(src_matrix[:3, :3]).abs(), dim=0).numpy()
 
     # initialize new
     data = x.data.copy()
-    affine = x.geom.vox2world.matrix.copy()
+    affine = matrix.clone()
 
     # align axes
+
     affine[:, world_axes_trg] = affine[:, world_axes_src]
-    for i in range(x.basedim):
+    for i in range(3):
         if world_axes_src[i] != world_axes_trg[i]:
             data = np.swapaxes(data, world_axes_src[i], world_axes_trg[i])
             swapped_axis_idx = np.where(world_axes_src == world_axes_trg[i])
             world_axes_src[swapped_axis_idx], world_axes_src[i] = world_axes_src[i], world_axes_src[swapped_axis_idx]
-
+    # data = torch.from_numpy(data)
     # align directions
-    dot_products = np.sum(affine[:3, :3] * trg_matrix[:3, :3], axis=0)
-    for i in range(x.basedim):
+    dot_products = torch.sum(affine[:3, :3] * trg_matrix[:3, :3], dim=0)
+    for i in range(3):
         if dot_products[i] < 0:
             data = np.flip(data, axis=i)
             affine[:, i] = - affine[:, i]
             affine[:3, 3] = affine[:3, 3] - affine[:3, i] * (data.shape[i] - 1)
 
-    # update geometry
-    target_geom = ImageGeometry(
-        shape=data.shape[:3],
-        vox2world=affine,
-        voxsize=voxsize)
-    return x.new(data, target_geom)
+    return torch.from_numpy(data.copy()), affine
 
 def interp(source: np.ndarray, method: str, target_shape: List[int], affine=None, fill = 0):
     if not source.flags.c_contiguous and not source.flags.f_contiguous:
@@ -457,29 +457,20 @@ def _interpolate_nearest(source: np.array, target_shape: List[int], fill_value, 
     return target
 
 
-def _resize(x: sf.image.Volume):
-    _shape = x.baseshape if len(x.baseshape) >= 3 else x.baseshape + [1] * (3 - len(x.baseshape)) 
-    target_shape = tuple([math.ceil((gv * bs) / 1.) for gv, bs in zip(x.geom.voxsize, _shape)])
-
-    # Only kept because of the Volume constructor, not using for compute anymore
-    target_geom = ImageGeometry(
-        shape=target_shape,
-        voxsize=1.,
-        rotation=x.geom.rotation,
-        center=x.geom.center)
-    
-    affine = x.geom.world2vox @ _vox2world(target_shape, rotation=x.geom.rotation, center=x.geom.center)
-    # surfa/image/interp.pyx
-    interped = interpolate(source=_framed_data(x), target_shape=target_shape, method="nearest", affine=affine.matrix)
+def _resize(x: sf.image.Volume, affine: torch.Tensor, voxsize: List[float], rotation: torch.Tensor, center: torch.Tensor):
+    target_shape = tuple([math.ceil((gv * bs) / 1.) for gv, bs in zip(voxsize, x.shape)])   
+    affine = _world2vox(affine) @ _vox2world(target_shape, rotation=rotation.numpy(), center=center.numpy())
+    interped = interpolate(source=_framed_data(x).numpy(), target_shape=target_shape, method="nearest", affine=affine)
     # interped = interp(_framed_data(x), "nearest", target_shape, affine=affine.matrix)
     # np.testing.assert_allclose(interped, cinterped, atol=1e-6, rtol=1e-6)
-    # print(interped.shape, cinterped.shape)
-    return x.new(interped, target_geom)
+    
+    return torch.from_numpy(interped)
 
-def _conform(x: sf.image.Volume):
-    x = _orientation(x, "LIA")
-    x = _resize(x)
-    return x.astype(np.float32)
+def _conform(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor):
+    x, affine = _orientation(x, matrix, voxsize, "LIA")
+    center, rotation = _get_center_rotation(affine, voxsize, list(x.shape))
+    x = _resize(x, affine, voxsize, rotation, center)
+    return x.float()
 
 
 def _resample_like(x: torch.Tensor, target: sf.image.Volume, fill = 0):
@@ -512,16 +503,17 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
 
     # load input volume
     image: sf.image.Volume = sf.load_volume(in_image)
-
+    imagematrix = torch.from_numpy(image.geom.vox2world.matrix.copy()).float()
+    voxsize = torch.Tensor(image.geom.voxsize.copy()).float()
     dist = []
     mask = []
     for f in range(image.nframes):
         frame = image.new(_framed_data(image)[..., f])
-        conformed = _conform(frame)
+        conformed = _conform(frame, imagematrix, voxsize).squeeze()
         conformed = conformed[_bbox(conformed)]
         metadata = conformed.metadata
 
-        target_shape = ((torch.Tensor(conformed.shape[:3]) / 64).ceil().type(torch.int32) * 64).clip(192, 320)
+        target_shape = ((torch.Tensor(list(conformed.shape[:3])) / 64).ceil().int() * 64).clip(192, 320)
         conformed = _reshape(conformed, target_shape.tolist())
         x = conformed.data[None, None]
         x -= x.min()
