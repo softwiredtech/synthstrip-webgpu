@@ -195,6 +195,10 @@ def _reshape(x: sf.image.Volume, shape: List[int]):
 # Framed data is just the data with a last frame dimension
 # if data is shape (3, 3, 3) then framed data is shape (3, 3, 3, 1)
 def _framed_data(x: sf.image.Volume):
+    if isinstance(x, torch.Tensor):
+        if x.shape[-1] == 1:
+            return x
+        return x.unsqueeze(-1)
     arr = x.data
     for _ in range(x.basedim + 1 - x.data.ndim):
         arr = np.expand_dims(arr, axis=-1)
@@ -478,13 +482,12 @@ def _conform(x: sf.image.Volume):
     return x.astype(np.float32)
 
 
-def _resample_like(x: sf.image.Volume, target: sf.image.Volume, fill = 0):
+def _resample_like(x: torch.Tensor, target: sf.image.Volume, fill = 0):
     affine = _world2vox(_vox2world(x.shape)) @ target.geom.vox2world
-    interped = interpolate(source=_framed_data(x), target_shape=target.geom.shape, method='linear', affine=affine.matrix, fill=fill)
+    interped = interpolate(source=_framed_data(x).numpy(), target_shape=target.geom.shape, method='linear', affine=affine, fill=fill)
     # interped = interp(_framed_data(x), "linear", target.geom.shape, affine=affine.matrix, fill=fill)
     # np.testing.assert_allclose(interped, cinterped, atol=1e-4, rtol=1e-5)
-
-    return x.new(interped, target.geom)
+    return interped
 
 def _connected_components(x: sf.image.Volume):
         # https://docs.scipy.org/doc/scipy/reference/generated/scipy.ndimage.label.html
@@ -529,14 +532,17 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
             onnx_program = torch.onnx.dynamo_export(model, x)
             onnx_program.save("bet.onnx")
 
-        sdt = model(x).cpu().numpy()
+        sdt = model(x).cpu()
+
 
         if saving:
             np.save("./out_tensor.npy", sdt)
 
         # POST PROCESSING
-        sdt = extend_sdt(sf.image.framed.Volume(sdt, metadata=metadata), border=args.border)
-        sdt = sdt.resample_like(image, fill=100)
+        sdt = extend_sdt(sdt, border=args.border)
+
+        sdt = _resample_like(sdt, image, fill=100)
+        sdt = image.new(sdt, image.geom)
         dist.append(sdt)
         mask.append(_connected_component_mask((sdt < args.border), k=1, fill=True))
     # combine frames and end line
