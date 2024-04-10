@@ -32,7 +32,7 @@ def _vox2world(shape: List[int], rotation = None, center = None):
 def _get_center_rotation(affine: torch.Tensor, voxsize: torch.Tensor, shape: List[int]):
     center = (affine @ torch.Tensor([s / 2 for s in shape] +  [1]))[:3]
     q, r = torch.linalg.qr(affine[:3, :3])
-    di = np.diag_indices(3)
+    di = ([0, 1, 2], [0, 1, 2])
     voxsize = torch.abs(r[di])
     p = torch.eye(3)
     p[di] = r[di] / voxsize
@@ -184,23 +184,22 @@ class ConvBlock(nn.Module):
 def _reshape(x: torch.Tensor, shape: List[int]):
     shape = shape[:3]
 
-    if np.array_equal(x.shape, shape):
+    if all([s == xs for (xs, s) in zip(x.shape, shape)]):
         return x
 
-    tdelta = (torch.Tensor(shape) - torch.Tensor(list(x.shape))) / 2
-    tlow = tdelta.floor().int()
-    thigh = tdelta.ceil().int()
+    tdelta = [(s - xs) / 2 for (s, xs) in zip(shape, x.shape)]
+    tlow = [int(math.floor(x)) for x in tdelta]
+    thigh = [int(math.ceil(x)) for x in tdelta]
 
-    tc_low = tlow.clip(0)
-    tc_high = thigh.clip(0)
+    tc_low = [max(x, 0) for x in tlow]
+    tc_high = [max(x, 0) for x in thigh]
     # TODO: Clean this up
-    tpadding = ([z for y in zip(tc_low.tolist(), tc_high.tolist()) for z in y])
+    tpadding = ([z for y in zip(tc_low, tc_high) for z in y])
     tc_data = torch.nn.functional.pad(_framed_data(x).T, tpadding, mode='constant')
     tc_data = tc_data.permute(*torch.arange(tc_data.ndim - 1, -1, -1))
-
-    tcropping = tuple([slice(a, b) for a, b in zip((thigh.neg().clip(0)).int().tolist(), (torch.Tensor(list(tc_data.shape[:3])) - tlow.neg().clip(0)).int().tolist())])
-    tc_data = tc_data[tcropping]
-    return tc_data.squeeze()
+    
+    tcropping = tuple([slice(a, b) for a, b in zip([max(-x, 0) for x in thigh], [int(s - (max(-xs, 0))) for (s, xs) in zip(tc_data.shape, tlow)])])
+    return tc_data[tcropping].squeeze()
 
 # Framed data is just the data with a last frame dimension
 # if data is shape (3, 3, 3) then framed data is shape (3, 3, 3, 1)
@@ -471,9 +470,7 @@ def _conform(x: sf.image.Volume, matrix: torch.Tensor, voxsize: torch.Tensor):
 
 def _resample_like(x: torch.Tensor, target: sf.image.Volume, fill = 0):
     affine = _world2vox(_vox2world(x.shape)) @ target.geom.vox2world
-    interped = interpolate(source=_framed_data(x).numpy(), target_shape=target.geom.shape, method='linear', affine=affine, fill=fill)
-    # interped = interp(_framed_data(x), "linear", target.geom.shape, affine=affine.matrix, fill=fill)
-    # np.testing.assert_allclose(interped, cinterped, atol=1e-4, rtol=1e-5)
+    interped = interp(_framed_data(x).numpy(), "linear", target.geom.shape, affine=affine, fill=fill)
     return interped
 
 def _connected_components(x: torch.Tensor):
@@ -508,10 +505,12 @@ def run(in_image: str, modelfile: str = "./synthstrip.1.pt", saving: bool = Fals
         frame = _framed_data(timage)[..., f]
         conformed = _conform(frame, imagematrix, voxsize).squeeze()
         conformed = conformed[_bbox(conformed)]
-        metadata = conformed.metadata
+        # return
 
-        target_shape = ((torch.Tensor(list(conformed.shape[:3])) / 64).ceil().int() * 64).clip(192, 320)
-        conformed = _reshape(conformed, target_shape.tolist())
+
+        target_shape = [max(min(int(math.ceil(s / 64)) * 64, 320), 192) for s in conformed.shape[:3]]
+        conformed = _reshape(conformed, target_shape)
+        # return
         x = conformed.data[None, None]
         x -= x.min()
         x = (x / x.quantile(.99)).clip(0, 1)
